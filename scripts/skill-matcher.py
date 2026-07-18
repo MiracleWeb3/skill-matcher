@@ -31,6 +31,10 @@ MIN_NAME_SCORE = 3.0     # floor when the prompt hits the skill's own name
 REL_CUTOFF = 0.30        # drop hits weaker than this fraction of the best hit
 NAME_WEIGHT = 2.0        # a term in the skill's own name beats one in its prose
 SYNONYM_WEIGHT = 0.5     # an inferred term is weaker evidence than a typed one
+MIN_SINGLE_TERM = 8.0    # floor when a single typed word is the entire case for a skill
+NAME_COVERAGE = 0.34     # share of typed terms a lone name hit must carry to count as strong
+MIN_FINGERPRINT = 6      # tokens needed before two descriptions may be called the same skill
+ALIAS_SIMILARITY = 0.85  # description overlap at which two names are one skill
 
 STOP = set("""a about above after again against all am an and any are aren as at be because been
 before being below between both but by can cannot could did didn do does doesn doing don down
@@ -178,9 +182,18 @@ SYNONYMS = _build_synonyms()
 def expand(terms):
     """Query-side only: adding synonyms to docs would blur every skill together.
     Returns term -> weight, since a word you actually typed is stronger evidence than
-    one a concept group inferred for you."""
-    weights = {t: 1.0 for t in terms}
+    one a concept group inferred for you.
+
+    Repetition counts. A prompt that says "bug" twice and "fix" once is about bugs, even
+    when some rarer word wandered through it once -- dropping term frequency was what let
+    a single mention of "dashboard" outrank the thing the whole message was asking for.
+    Sublinear, because saying it three times doesn't make it three times the request."""
+    weights = {}
     for t in terms:
+        weights[t] = weights.get(t, 0.0) + 1.0
+    for t, count in list(weights.items()):
+        weights[t] = 1.0 + math.log(count)
+    for t in list(weights):
         for syn in SYNONYMS.get(t, ()):
             weights.setdefault(syn, SYNONYM_WEIGHT)
     return weights
@@ -199,9 +212,67 @@ def read_description(path):
     return re.sub(r"\s+", " ", d.group(1)).strip(" >|-\"'") if d else ""
 
 
+# Skills that ship inside Claude Code itself. They have no SKILL.md anywhere on disk, so
+# scanning can't see them -- and the ones you'd most want suggested (code-review, dataviz)
+# were never once offered. Descriptions are trimmed from their own listings.
+# ponytail: a hand-kept list, because there is nothing to read. Add a line when Claude Code
+# ships a new built-in; a stale entry costs one suggestion, not a crash.
+BUILTINS = [
+    ("dataviz", "Create charts, graphs, plots, dashboards and data visualizations in any "
+     "medium: HTML, SVG, matplotlib, plotly, d3, Recharts. Palettes, axes, legends, "
+     "tooltips, stat tiles, heatmaps, sparklines, categorical and diverging colour."),
+    ("code-review", "Review the current diff for correctness bugs and reuse, simplification "
+     "and efficiency cleanups. Can post findings as inline pull request comments or apply "
+     "them to the working tree."),
+    ("simplify", "Review changed code for reuse, simplification, efficiency and altitude "
+     "cleanups, then apply the fixes. Quality only, it does not hunt for bugs."),
+    ("security-review", "Review code for security vulnerabilities, injection, broken auth, "
+     "leaked secrets and unsafe patterns."),
+    ("run", "Launch and drive this project's app to see a change working: start the app, "
+     "screenshot it, confirm a change behaves in the real app and not only in tests."),
+    ("claude-api", "Reference for the Claude API and Anthropic SDK: model ids, pricing, "
+     "parameters, streaming, tool use, MCP, agents, prompt caching, token counting, "
+     "model migration."),
+    ("update-config", "Configure the Claude Code harness through settings.json: hooks for "
+     "automated behaviour, permissions and allowlists, environment variables."),
+    ("keybindings-help", "Customize keyboard shortcuts, rebind keys and add chord bindings "
+     "in keybindings.json."),
+    ("fewer-permission-prompts", "Scan transcripts for common read-only Bash and MCP calls, "
+     "then write an allowlist into settings.json to cut permission prompts."),
+    ("loop", "Run a prompt or slash command on a recurring interval, or let the model pace "
+     "its own repeated iterations of a task."),
+    ("schedule", "Create, update, list or run scheduled cloud agents and routines on a cron "
+     "schedule, including one-off future runs."),
+    ("artifact-design", "Design guidance and fundamentals for Artifacts, the shareable HTML "
+     "or Markdown pages published and hosted for other people to view."),
+]
+
+
+def _fingerprint(slug, desc):
+    """Content identity, so renames collapse into the skill they were renamed from.
+
+    An aggregator plugin that vendors another plugin under a new name is invisible to
+    slug matching -- 'spartan' and 'ponytail', 'sisyphus' and 'ralph' are byte-identical
+    once each drops its own name, but nothing pairs them, so both eat a suggestion slot
+    and you get two names for one skill. Subtracting the slug's own words leaves almost
+    exactly the shared prose -- almost, because the stripping is asymmetric: "ralplan" is
+    a single token, so its description keeps a "plan" that "sisyphus-plan" loses. Hence
+    near-equality below, not equality. Genuine rewrites keep their own wording and survive
+    as themselves.
+    """
+    terms = set(tokenize(desc)) - set(tokenize(slug))
+    return terms if len(terms) >= MIN_FINGERPRINT else set()
+
+
+def _same_skill(a, b):
+    """Renamed twins overlap at .90 and up, real rewrites of one idea sit near .03, so
+    the call in between is one this never has to make."""
+    return len(a & b) >= ALIAS_SIMILARITY * len(a | b)
+
+
 def build_index():
     """Every skill the model can actually invoke right now: user skills that aren't
-    overridden off, plus skills from enabled plugins."""
+    overridden off, plus skills from enabled plugins, plus the built-ins."""
     try:
         settings = json.load(open(os.path.join(CLAUDE, "settings.json")))
     except (OSError, ValueError):
@@ -219,24 +290,39 @@ def build_index():
     except (OSError, ValueError, KeyError):
         pass
 
-    skills, seen = [], set()
+    skills, seen, seen_content = [], set(), []
+
+    def add(slug, desc, prefix=""):
+        # Same skill vendored twice, by slug or by content; one suggestion is enough.
+        # ponytail: ties go to whoever is scanned first -- own skills dir, then plugin
+        # order -- which is stable and good enough while the copies say the same thing.
+        if slug in seen:
+            return
+        fingerprint = _fingerprint(slug, desc)
+        if fingerprint and any(_same_skill(fingerprint, o) for o in seen_content):
+            return
+        seen.add(slug)
+        if fingerprint:
+            seen_content.append(fingerprint)
+        skills.append({
+            "name": prefix + slug,
+            "desc": desc,
+            "name_terms": set(tokenize(slug)),
+            "terms": set(tokenize(slug + " " + desc)),
+        })
+
     for root, prefix in sources:
         for path in sorted(glob.glob(os.path.join(root, "*", "SKILL.md"))):
             slug = os.path.basename(os.path.dirname(path))
             if not prefix and overrides.get(slug) == "off":
                 continue
-            if slug in seen:      # same skill vendored twice; one suggestion is enough
-                continue
             desc = read_description(path)
-            if not desc:
-                continue
-            seen.add(slug)
-            skills.append({
-                "name": prefix + slug,
-                "desc": desc,
-                "name_terms": set(tokenize(slug)),
-                "terms": set(tokenize(slug + " " + desc)),
-            })
+            if desc:
+                add(slug, desc, prefix)
+
+    for slug, desc in BUILTINS:
+        if overrides.get(slug) != "off":
+            add(slug, desc)
     return skills
 
 
@@ -250,27 +336,65 @@ def match(prompt, skills):
             df[t] = df.get(t, 0) + 1
 
     query = expand(tokenize(prompt))
+    typed = {t for t in query if query[t] >= 1.0}
     scored = []
     for s in skills:
         hits = set(query) & s["terms"]
         if not hits:
             continue
-        score = 0.0
+        name_hits = hits & s["name_terms"]
+        # A name hit is strong evidence only when the prompt is actually ABOUT that word.
+        # "dashboard" inside a twenty-word bug report is incidental -- the prompt is about
+        # bugs -- while "ponytail" typed on its own is the whole request. Without this, one
+        # rare word landing on a skill's name doubles its way past a skill that genuinely
+        # matched four terms, and the junk that lands on top teaches you to skip the line.
+        # Corroboration has to come from words you typed. Counting inferred ones lets a
+        # single word vouch for itself: "dashboard" expands into the whole chart group,
+        # which then matches a dashboard skill four ways and calls that four pieces of
+        # evidence -- when the prompt said "dashboard chat" and meant a window.
+        strong_name = bool(name_hits) and (
+            len(hits & typed) >= 2 or len(name_hits & typed) >= len(typed) * NAME_COVERAGE)
+        # ponytail: name evidence is all-or-nothing on purpose. Scaling the bonus by how
+        # much of the prompt the name covers reads better and measures worse -- it starved
+        # "build me a dashboard for these metrics" of the dashboard skill without rescuing
+        # the incidental case it was meant to fix. If a name you typed in passing still
+        # outranks your actual topic, weight names by term rarity here, not by coverage.
+        said = inferred = 0.0
         for t in hits:
             idf = math.log((n - df[t] + 0.5) / (df[t] + 0.5) + 1.0)
-            score += idf * (NAME_WEIGHT if t in s["name_terms"] else 1.0) * query[t]
-        # Either you hit the skill's own name, or you hit several things you actually
-        # typed. One generic word in a description ("time", "set") is not a signal.
-        if hits & s["name_terms"]:
-            floor = MIN_NAME_SCORE
-        elif sum(1 for t in hits if query[t] == 1.0) >= 2:
-            floor = MIN_SCORE
-        else:
+            weight = NAME_WEIGHT if (strong_name and t in s["name_terms"]) else 1.0
+            if t in typed:
+                said += idf * weight * query[t]
+            else:
+                inferred += idf * weight * query[t]
+        # Inferred evidence may support what you said, never outvote it. One word fans out
+        # to a dozen synonyms, and a skill whose description happens to list all twelve was
+        # collecting twelve counts of proof from a single passing mention -- enough to put a
+        # charting skill on top of a bug report because the word "dashboard" went by once.
+        score = said + min(inferred, said)
+        # At least one word you actually typed, always -- a match built purely from inferred
+        # synonyms is the concept table talking to itself. Past that, let the score decide:
+        # it already carries rarity, repetition and name weight, and counting distinct terms
+        # instead threw away the right answer whenever a prompt made its point with one word.
+        if not (hits & typed):
             continue
+        if strong_name:
+            floor = MIN_NAME_SCORE
+        elif len(hits & typed) == 1:
+            # Resting on one word is fine when that word carries the prompt ("bug"), and
+            # noise when it is ordinary English that a description happened to contain --
+            # "what time is it" should not summon anything. Rarity can't tell those apart,
+            # so make a lone word clear a bar the incidental ones never reach.
+            floor = MIN_SINGLE_TERM
+        else:
+            floor = MIN_SCORE
         if score >= floor:
             scored.append((score, s["name"]))
 
-    scored.sort(reverse=True)
+    # Tie on score goes to the shorter name: typing "ponytail" wants the skill itself,
+    # not ponytail-review, and reverse-sorting the tuple used to bury the parent under
+    # every sub-skill that shares its name.
+    scored.sort(key=lambda x: (-x[0], len(x[1]), x[1]))
     scored = [x for x in scored[:MAX_HITS] if x[0] >= MIN_SCORE]
     return [name for score, name in scored if score >= scored[0][0] * REL_CUTOFF]
 
@@ -318,8 +442,30 @@ def self_test():
     for n_ in noise:
         assert not match(n_, skills), f"should stay silent on {n_!r}: {match(n_, skills)}"
 
+    # The regression that made the whole line ignorable: one incidental word landing on a
+    # skill's name ("dashboard chat" -- a window, not a chart) used to double past every
+    # skill the prompt was genuinely about, so the junk on top taught you to skip the rest.
+    report = ("difference between X chat and what is happening in dashboard chat: it did "
+              "not read the conversation, did not pull all messages, and started answering. "
+              "Another bug. Overall i see 3 bugs, right? Fix all.")
+    hits = match(report, skills)
+    # By description, not by name -- a renamed debugging skill is still a debugging skill,
+    # and mythological aliases are exactly what this index is full of.
+    desc_of = {s["name"]: s["desc"].lower() for s in skills}
+    debugging = [i for i, h in enumerate(hits)
+                 if re.search(r"\bbugs?\b|debug|diagnos", desc_of.get(h, ""))]
+    passing = [i for i, h in enumerate(hits) if h.split(":")[-1] == "dashboard"]
+    # It may still appear -- the word was typed -- but never above what was being asked.
+    assert not passing or (debugging and min(debugging) < min(passing)), \
+        f"incidental name word still outranking the topic: {hits}"
+
+    # Aliases must have collapsed, or one skill occupies two slots under two names.
+    prints = [p for p in (_fingerprint(s["name"].split(":")[-1], s["desc"]) for s in skills) if p]
+    twins = [(a, b) for i, a in enumerate(prints) for b in prints[i + 1:] if _same_skill(a, b)]
+    assert not twins, f"{len(twins)} skill(s) indexed twice under different names"
+
     print(f"ok - {len(skills)} skills indexed, {checked} name lookups + "
-          f"{len(noise)} silences pass")
+          f"{len(noise)} silences + alias collapse pass")
 
 
 def main():
