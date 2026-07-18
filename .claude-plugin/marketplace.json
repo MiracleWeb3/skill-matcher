@@ -1,0 +1,16 @@
+{
+  "name": "skill-matcher",
+  "owner": {
+    "name": "MiracleWeb3",
+    "url": "https://github.com/MiracleWeb3"
+  },
+  "plugins": [
+    {
+      "name": "skill-matcher",
+      "source": "./",
+      "description": "Surfaces the skills that fit what you just asked, so a big skill library stops going unused. Local scoring, no LLM calls.",
+      "category": "productivity",
+      "tags": ["skills", "hook", "search", "zero-token"]
+    }
+  ]
+}

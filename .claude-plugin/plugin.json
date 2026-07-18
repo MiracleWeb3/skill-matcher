@@ -1,0 +1,13 @@
+{
+  "name": "skill-matcher",
+  "version": "0.1.0",
+  "description": "Surfaces the skills that fit what you just asked. Scores every prompt against every installed skill locally and injects the top matches, so a big skill library stops going unused. No LLM calls, no network, no tokens.",
+  "author": {
+    "name": "MiracleWeb3",
+    "url": "https://github.com/MiracleWeb3"
+  },
+  "homepage": "https://github.com/MiracleWeb3/skill-matcher",
+  "repository": "https://github.com/MiracleWeb3/skill-matcher",
+  "license": "MIT",
+  "keywords": ["skills", "hook", "search", "bm25", "zero-token", "no-daemon"]
+}
