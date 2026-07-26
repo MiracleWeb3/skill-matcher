@@ -109,10 +109,29 @@ $ skill-matcher --stats
 no log yet at ~/.claude/skill-matcher/events.tsv — the hook has not run
 ```
 
-Once it has, that becomes four lines: how many times it spoke and how loudly, how many distinct
-skills it named across how many sessions, how many skills were actually invoked, and the one
-that matters — **followed: M of N**. No numbers are quoted here because none have been measured
-yet; the log starts empty and this README is not going to invent a hit rate.
+Once it has, that becomes a summary and a table: how many times it spoke and how loudly, how
+many distinct skills it named across how many sessions, how many were actually invoked, the
+dates covered, and the one that matters — **followed: M of N**.
+
+```console
+$ skill-matcher --stats
+suggestions   3  (1 decisive, 2 offered a choice)
+skills named  4 distinct, across 3 sessions
+invocations   2 logged
+followed      2 of 4  (50%)
+covering      2026-07-20 to 2026-07-26
+
+skill                                     offered  followed
+dataviz                                         1         0
+humanizer                                       1         1
+metal                                           1         1
+ponytail:ponytail                               1         0
+```
+
+Those are illustrative rows from the test fixture, not a measured hit rate — the log starts
+empty and this README is not going to invent one. The per-skill table is the actionable half:
+an average tells you something is wrong, a skill offered forty times and never once followed
+tells you *what*.
 
 Two hooks and an append-only TSV: one line when a skill is suggested, one when a skill is
 actually invoked, joined by session. Before this, a correct suggestion nobody acted on looked

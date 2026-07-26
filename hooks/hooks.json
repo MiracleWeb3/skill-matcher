@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "B=\"${XDG_CACHE_HOME:-$HOME/.cache}/skill-matcher/sm\"; S=\"${CLAUDE_PLUGIN_ROOT}/src\"; if ! { [ -x \"$B\" ] && [ ! \"$S/main.cpp\" -nt \"$B\" ]; }; then mkdir -p \"${B%/*}\"; c++ -std=c++20 -O2 -o \"$B\" \"$S\"/*.cpp 2>/dev/null || echo \"skill-matcher: no working C++ compiler, so no skills will be suggested this session\"; fi",
+            "command": "B=\"${XDG_CACHE_HOME:-$HOME/.cache}/skill-matcher/sm\"; S=\"${CLAUDE_PLUGIN_ROOT}/src\"; N=$(ls -t \"$S\"/*.cpp \"$S\"/*.hpp 2>/dev/null | head -1); if ! { [ -x \"$B\" ] && [ -n \"$N\" ] && [ ! \"$N\" -nt \"$B\" ]; }; then mkdir -p \"${B%/*}\"; c++ -std=c++20 -O2 -o \"$B\" \"$S\"/*.cpp 2>/dev/null || echo \"skill-matcher: no working C++ compiler, so no skills will be suggested this session\"; fi",
             "timeout": 60
           }
         ]
