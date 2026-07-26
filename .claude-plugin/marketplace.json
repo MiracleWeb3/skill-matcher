@@ -1,16 +1,14 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "skill-matcher",
-  "owner": {
-    "name": "MiracleWeb3",
-    "url": "https://github.com/MiracleWeb3"
-  },
+  "description": "Names the right skill before the model answers.",
+  "owner": {"name": "MiracleWeb3", "url": "https://github.com/MiracleWeb3"},
   "plugins": [
     {
       "name": "skill-matcher",
+      "description": "Scores every prompt against every installed skill locally and names at most two, or says nothing. No LLM, no network, no tokens. Logs suggested-vs-invoked so the hit rate is a number, not a feeling.",
       "source": "./",
-      "description": "Surfaces the skills that fit what you just asked, so a big skill library stops going unused. Local scoring, no LLM calls.",
-      "category": "productivity",
-      "tags": ["skills", "hook", "search", "zero-token"]
+      "category": "productivity"
     }
   ]
 }

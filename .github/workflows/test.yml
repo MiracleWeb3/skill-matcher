@@ -1,0 +1,29 @@
+name: test
+
+on: [push, pull_request]
+
+jobs:
+  selftest:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        run: c++ -std=c++20 -O2 -Wall -Wextra -Werror -DSM_SELFTEST -o /tmp/sm src/*.cpp
+      - name: selftest
+        run: /tmp/sm --test
+      - name: fails open on garbage
+        run: |
+          echo 'not json'   | /tmp/sm
+          echo '{}'         | /tmp/sm
+          printf ''         | /tmp/sm
+          test -z "$(echo 'not json' | /tmp/sm)"
+      - name: manifests parse
+        run: python3 -c "import json;[json.load(open(p)) for p in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','hooks/hooks.json']]"
+      - name: every file inside the 300-line rule
+        run: |
+          for f in src/*.cpp src/*.hpp src/*.inc; do
+            n=$(wc -l < "$f"); echo "$f: $n"; test "$n" -le 300
+          done
